@@ -14,6 +14,64 @@ from backend.auth import hash_password
 INACTIVITY_SECONDS = 10
 CHECK_INTERVAL_MS = 300
 
+class GlobalActivityMonitor:
+    """
+    Global (system-wide) mouse & keyboard listener using pynput.
+    Calls a callback on *any* movement/click/scroll/key press.
+    """
+    def __init__(self, on_activity, min_interval=0.15):
+        self.on_activity = on_activity
+        self.min_interval = min_interval
+        self._last_fire = 0.0
+        self._mouse_listener = None
+        self._key_listener = None
+        self._running = False
+
+    def _maybe_fire(self):
+        now = time.monotonic()
+        if now - self._last_fire >= self.min_interval:
+            self._last_fire = now
+            # Call into the Tk thread-safe: just invoke the callback;
+            # it only updates a timestamp, so it's safe/lightweight.
+            self.on_activity()
+
+    # Mouse callbacks
+    def _on_move(self, x, y):
+        self._maybe_fire()
+    def _on_click(self, x, y, button, pressed):
+        self._maybe_fire()
+    def _on_scroll(self, x, y, dx, dy):
+        self._maybe_fire()
+
+    # Keyboard callback
+    def _on_press(self, key):
+        self._maybe_fire()
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._mouse_listener = pyn_mouse.Listener(
+            on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll
+        )
+        self._key_listener = pyn_keyboard.Listener(on_press=self._on_press)
+        self._mouse_listener.start()
+        self._key_listener.start()
+
+    def stop(self):
+        self._running = False
+        try:
+            if self._mouse_listener:
+                self._mouse_listener.stop()
+        except Exception:
+            pass
+        try:
+            if self._key_listener:
+                self._key_listener.stop()
+        except Exception:
+            pass
+
+
 class UserApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -27,6 +85,7 @@ class UserApp(tk.Tk):
         self.current_user = None
         self.last_activity = time.monotonic()
         self.inactive_sent = False
+        self.global_monitor = None
 
         self.frames = {}
         for F in (AuthFrame, TrackerFrame):
@@ -34,6 +93,12 @@ class UserApp(tk.Tk):
             self.frames[F.__name__] = frame
 
         self.show_frame("AuthFrame")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        if self.global_monitor:
+            self.global_monitor.stop()
+        self.destroy()
 
     def _ensure_single_admin(self):
         # Create admin if missing
@@ -60,11 +125,18 @@ class UserApp(tk.Tk):
         self.last_activity = time.monotonic()
         self.inactive_sent = False
 
-        # Bind events only after login
-        for seq in ("<Any-KeyPress>", "<Any-Button>", "<Motion>", "<MouseWheel>"):
-            self.bind_all(seq, self.on_activity, add="+")
+        # Start system-wide activity monitor
+        self.global_monitor = GlobalActivityMonitor(self.on_activity, min_interval=0.15)
+        self.global_monitor.start()
+
+        # No need for Tk bind_all anymore
+        # for seq in ("<Any-KeyPress>", "<Any-Button>", "<Motion>", "<MouseWheel>"):
+        #     self.bind_all(seq, self.on_activity, add="+")
+
         self.show_frame("TrackerFrame")
         self.after(CHECK_INTERVAL_MS, self._loop_check)
+
+       
 
     def on_activity(self, event=None):
         self.last_activity = time.monotonic()
