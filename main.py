@@ -28,12 +28,19 @@ except Exception:
 from backend.models import (
     init_tables, get_user_by_username_or_email, insert_user, get_user_by_id,
     update_user_status, record_event,
-    insert_screenshot_url, insert_recording_url
+    insert_screenshot_url, insert_recording_url,
+    list_admin_emails,  # <-- NEW: to email all admins
 )
 from backend.auth import login, hash_password
 from backend.activity import set_user_status
 from backend.config import ADMIN_BOOTSTRAP
 from backend.notify import send_email
+
+# OPTIONAL: if you add ALERT_RECIPIENTS in config.py, uncomment:
+try:
+    from backend.config import ALERT_RECIPIENTS
+except Exception:
+    ALERT_RECIPIENTS = []
 
 INACTIVITY_SECONDS = 10
 CHECK_INTERVAL_MS = 300
@@ -210,12 +217,42 @@ class UserApp(tk.Tk):
             u = self.current_user
             duration_txt = seconds_to_hhmmss(active_duration) if active_duration else "unknown"
             when_txt = now_local.strftime("%Y-%m-%d %H:%M:%S %Z")
-            body = (f"User {u['name']} ({u['username']}, {u['email']}, {u['department']}) became INACTIVE at {when_txt}.\n"
-                    f"Active streak before inactivity: {duration_txt}.\n")
+            body = (
+                f"User {u['name']} ({u['username']}, {u['email']}, {u['department']}) "
+                f"became INACTIVE at {when_txt}.\n"
+                f"Active streak before inactivity: {duration_txt}.\n"
+            )
+
+            # === UPDATED EMAIL FAN-OUT ===
             try:
-                send_email([u["email"], ADMIN_BOOTSTRAP["email"]],
-                           subject=f"[IdleTracker] {u['username']} inactive",
-                           body=body)
+                recipients = set()
+
+                # the user
+                if u.get("email"):
+                    recipients.add(u["email"])
+
+                # all admins from DB
+                try:
+                    for em in list_admin_emails():
+                        if em:
+                            recipients.add(em)
+                except Exception:
+                    pass
+
+                # bootstrap admin (fallback)
+                if ADMIN_BOOTSTRAP.get("email"):
+                    recipients.add(ADMIN_BOOTSTRAP["email"])
+
+                # optional extra recipients from env (comma-separated)
+                for extra in ALERT_RECIPIENTS:
+                    recipients.add(extra)
+
+                if recipients:
+                    send_email(
+                        list(recipients),
+                        subject=f"[IdleTracker] {u['username']} inactive",
+                        body=body
+                    )
             except Exception:
                 pass
 
@@ -267,6 +304,7 @@ class UserApp(tk.Tk):
         if self.next_screenshot_after_ms <= 0:
             try:
                 img_bytes = self._capture_png_bytes()
+                # For random activity screenshots, keep event_id=None intentionally
                 insert_screenshot_url(self.current_user["id"], img_bytes, event_id=None, mime="image/png")
                 self.screenshots_taken_today += 1
             except Exception:
