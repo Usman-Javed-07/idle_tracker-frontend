@@ -5,6 +5,9 @@ import time
 import tempfile
 import datetime as dt
 import threading
+import sys
+import atexit
+import signal
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -28,12 +31,9 @@ from backend.models import (
     init_tables, get_user_by_username_or_email, insert_user, get_user_by_id,
     update_user_status, record_event,
     insert_screenshot_url, insert_recording_url,
-    list_admin_emails,
-    # you implement this in backend.models (simple upsert/insert into user_overtimes):
-    insert_overtime,
+    list_admin_emails, insert_overtime,
 )
 from backend.auth import login, hash_password
-from backend.activity import set_user_status
 from backend.config import ADMIN_BOOTSTRAP
 from backend.notify import send_email
 
@@ -43,9 +43,32 @@ except Exception:
     ALERT_RECIPIENTS = []
 
 INACTIVITY_SECONDS = 10
-CHECK_INTERVAL_MS = 300
+CHECK_INTERVAL_MS = 250          # fast loop so 1s ticks are precise
 MIN_SCREENSHOTS_PER_SHIFT = 15
-LOGIN_PROMPT_EVERY_S = 3  # pre-login reminder
+LOGIN_PROMPT_EVERY_S = 15        # pre-login reminder cadence
+
+APP_NAME = "Mars Capital"
+APP_ICON = os.path.join(os.getcwd(), "assets", "mars.ico")
+if not os.path.isfile(APP_ICON):
+    APP_ICON = None
+
+# Windows toast branding: set AppUserModelID so it won't say "Python"
+if sys.platform.startswith("win"):
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MarsCapital.IdleTracker")
+    except Exception:
+        pass
+
+
+def _notify(title, message, timeout=5):
+    kw = {"title": title, "message": message, "timeout": timeout, "app_name": APP_NAME}
+    if APP_ICON:
+        kw["app_icon"] = APP_ICON
+    try:
+        notification.notify(**kw)
+    except Exception:
+        pass
 
 
 class GlobalActivityMonitor:
@@ -90,42 +113,103 @@ class UserApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("User Client - Idle Tracker")
-        self.geometry("540x360")
+        self.geometry("580x480")
         self.resizable(False, False)
+
+        # Show on taskbar and allow minimize; disable close.
+        self.protocol("WM_DELETE_WINDOW", self._block_close)
+        self.bind_all("<Alt-F4>", lambda e: "break")
 
         init_tables()
         self._ensure_single_admin()
 
+        # session/user state
         self.current_user = None
         self.last_activity = time.monotonic()
         self.inactive_sent = False
         self.active_since = None
+        self.inactive_started_mono = None
+
+        # today counters (seconds)
+        self.active_seconds_today = 0
+        self.inactive_seconds_today = 0
+        self.overtime_seconds_today = 0
+
+        # time bookkeeping for 1-second ticks
+        self._last_tick = time.monotonic()
+
         self.global_monitor = GlobalActivityMonitor(self._on_global_activity, min_interval=0.15)
         self.global_monitor.start()
 
-        # pre-login reminder state
+        # pre-login reminder
         self._last_login_prompt = 0.0
 
-        # random screenshot scheduling
+        # screenshots scheduling
         self.screenshots_taken_today = 0
         self.next_screenshot_after_ms = None
 
-        # overtime state
+        # overtime window
         self._today_shift_end = None
-        self._overtime_started_mono = None  # when user is actively working after shift end
+        self._overtime_started_mono = None
 
         # recording state
         self._recording_in_progress = False
 
+        # UI
         self.frames = {}
         for F in (AuthFrame, TrackerFrame):
             frame = F(self); self.frames[F.__name__] = frame
         self.show_frame("AuthFrame")
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # center the window on screen
+        self.after(10, self._center_on_screen)
+
+        # graceful shutdown hooks
+        atexit.register(self._graceful_shutdown)
+        for sig in ("SIGINT", "SIGTERM"):
+            if hasattr(signal, sig):
+                signal.signal(getattr(signal, sig), self._signal_exit)
+
+        # main loop
         self.after(CHECK_INTERVAL_MS, self._loop_check)
 
-    # ----- helpers -----
+    # ---- window helpers ----
+    def _center_on_screen(self):
+        self.update_idletasks()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw // 2) - (w // 2)
+        y = (sh // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _block_close(self):
+        # ignore user close; minimize is allowed via taskbar or button
+        pass
+
+    def _signal_exit(self, *_args):
+        self._graceful_shutdown()
+        os._exit(0)
+
+    def _graceful_shutdown(self):
+        try:
+            # flush any running overtime slice
+            self._flush_overtime_segment()
+        except Exception:
+            pass
+        try:
+            # set status to off if user was logged in
+            if self.current_user:
+                update_user_status(self.current_user["id"], "off")
+        except Exception:
+            pass
+        try:
+            if self.global_monitor: self.global_monitor.stop()
+        except Exception:
+            pass
+
+    # ---- data helpers ----
     def _ensure_single_admin(self):
         row = get_user_by_username_or_email(ADMIN_BOOTSTRAP["username"])
         if not row:
@@ -159,116 +243,124 @@ class UserApp(tk.Tk):
             start = start.replace(tzinfo=SHIFT_TZ); end = end.replace(tzinfo=SHIFT_TZ)
         self._today_shift_end = end
 
-    # ----- UI frame switching -----
+    def _today_total_seconds(self):
+        return self.active_seconds_today + self.inactive_seconds_today
+
+    # ---- UI switching ----
     def show_frame(self, name):
         for f in self.frames.values(): f.pack_forget()
         self.frames[name].pack(fill="both", expand=True)
 
-    # ----- global activity handler -----
+    # ---- activity handler ----
     def _on_global_activity(self):
-        self.last_activity = time.monotonic()
-        # If not logged in yet, remind to login every 10s
-        if self.current_user is None:
-            now = time.monotonic()
-            if now - self._last_login_prompt >= LOGIN_PROMPT_EVERY_S:
-                self._last_login_prompt = now
-                try:
-                    notification.notify(
-                        title="Please log in",
-                        message="Activity detected. Open the app and log in to start tracking.",
-                        timeout=10,
-                    )
-                except Exception:
-                    pass
-            return
+        now = time.monotonic()
+        self.last_activity = now
+        if self.current_user is not None:
+            if self.inactive_sent:
+                update_user_status(self.current_user["id"], "active")
+                self.inactive_sent = False
+                self.active_since = now
+                self.inactive_started_mono = None
+                self.frames["TrackerFrame"].set_status("Active")
+            elif self.active_since is None:
+                update_user_status(self.current_user["id"], "active")
+                self.active_since = now
+                self.frames["TrackerFrame"].set_status("Active")
 
-        # When logged in, any activity means Active
-        if self.inactive_sent:
-            update_user_status(self.current_user["id"], "active")
-            self.inactive_sent = False
-            self.active_since = time.monotonic()
-            self.frames["TrackerFrame"].set_status("Active")
-        elif self.active_since is None:
-            update_user_status(self.current_user["id"], "active")
-            self.active_since = time.monotonic()
-            self.frames["TrackerFrame"].set_status("Active")
-
-    # ----- login flow -----
+    # ---- login flow ----
     def on_logged_in(self, user_dict):
         self.current_user = get_user_by_id(user_dict["id"])
         self._compute_today_bounds()
 
-        # become Active immediately on login
+        # reset counters and tick clock
+        self.active_seconds_today = 0
+        self.inactive_seconds_today = 0
+        self.overtime_seconds_today = 0
+        self._last_tick = time.monotonic()
+
+        # Active immediately
         update_user_status(self.current_user["id"], "active")
         self.frames["TrackerFrame"].set_status("Active")
 
+        # show details
+        self.frames["TrackerFrame"].set_user_info(
+            name=self.current_user.get("name") or "",
+            username=self.current_user.get("username") or "",
+            department=self.current_user.get("department") or "",
+        )
+        self.frames["TrackerFrame"].set_counters(
+            self.active_seconds_today,
+            self.inactive_seconds_today,
+            self.overtime_seconds_today,
+            self._today_total_seconds()
+        )
+
         self.last_activity = time.monotonic()
         self.inactive_sent = False
-        self.active_since = time.monotonic()
+        self.active_since = self.last_activity
+        self.inactive_started_mono = None
         self.screenshots_taken_today = 0
         self._plan_next_random_screenshot()
         self.show_frame("TrackerFrame")
 
-    # ----- main loop -----
+    # ---- main loop ----
     def _loop_check(self):
         now = time.monotonic()
         idle = now - self.last_activity
         self.frames["TrackerFrame"].update_idle(idle)
 
-        # overtime tracking (after end, only while user is actually active)
+        # login reminder every 15s (pre-login)
+        if self.current_user is None:
+            if now - self._last_login_prompt >= LOGIN_PROMPT_EVERY_S:
+                self._last_login_prompt = now
+                _notify("Please log in", "Open the user panel and sign in to start tracking.", timeout=10)
+
+        # overtime window
+        after_end = False
         if self.current_user:
             if self._today_shift_end is None:
                 self._compute_today_bounds()
             now_local = dt.datetime.now(SHIFT_TZ)
-            after_end = self._today_shift_end and (now_local >= self._today_shift_end)
+            after_end = bool(self._today_shift_end and (now_local >= self._today_shift_end))
 
-            if after_end:
+        # === 1-second ticker for counters ===
+        if now - self._last_tick >= 1.0:
+            delta = int(now - self._last_tick)
+            self._last_tick += delta
+            if self.current_user:
                 if idle < INACTIVITY_SECONDS:
-                    # actively working
-                    if self._overtime_started_mono is None:
-                        self._overtime_started_mono = time.monotonic()
+                    self.active_seconds_today += delta
+                    if after_end:
+                        self.overtime_seconds_today += delta
                 else:
-                    # just became idle -> flush any accrued overtime
-                    self._flush_overtime_segment()
+                    self.inactive_seconds_today += delta
 
-            # inactivity handling
+                # update UI every second
+                self.frames["TrackerFrame"].set_counters(
+                    self.active_seconds_today,
+                    self.inactive_seconds_today,
+                    self.overtime_seconds_today,
+                    self._today_total_seconds()
+                )
+
+        # inactivity boundary (event + notification; layout won’t jump)
+        if self.current_user:
             if idle >= INACTIVITY_SECONDS and not self.inactive_sent:
                 active_duration = int(now - self.active_since) if self.active_since is not None else None
-                event_id = record_event(self.current_user["id"], "inactive", active_duration_seconds=active_duration)
+                event_id = record_event(
+                    self.current_user["id"], "inactive",
+                    active_duration_seconds=active_duration
+                )
                 update_user_status(self.current_user["id"], "inactive")
                 self.inactive_sent = True
+                self.inactive_started_mono = now
                 self.frames["TrackerFrame"].set_status("Inactive")
+                _notify("You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
 
-                try:
-                    notification.notify(
-                        title="You are inactive",
-                        message=f"No activity for {INACTIVITY_SECONDS} seconds.",
-                        timeout=3,
-                    )
-                except Exception:
-                    pass
+                # email fan-out in background
+                self._fanout_inactive_email_async(active_duration)
 
-                u = self.current_user
-                when_txt = dt.datetime.now(SHIFT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-                duration_txt = seconds_to_hhmmss(active_duration) if active_duration else "unknown"
-                body = (f"User {u['name']} (@{u['username']}, {u['email']}, {u['department']}) "
-                        f"became INACTIVE at {when_txt}. Active streak: {duration_txt}.")
-
-                # email fan-out
-                try:
-                    recipients = set()
-                    if u.get("email"): recipients.add(u["email"])
-                    recipients.update(e for e in list_admin_emails() if e)
-                    if ADMIN_BOOTSTRAP.get("email"): recipients.add(ADMIN_BOOTSTRAP["email"])
-                    recipients.update(ALERT_RECIPIENTS)
-                    if recipients:
-                        send_email(list(recipients),
-                                   subject=f"[IdleTracker] {u['username']} inactive",
-                                   body=body)
-                except Exception:
-                    pass
-
-                # non-blocking 5s recording
+                # short recording (non-blocking)
                 if not self._recording_in_progress:
                     self._recording_in_progress = True
                     threading.Thread(
@@ -280,34 +372,62 @@ class UserApp(tk.Tk):
 
         self.after(CHECK_INTERVAL_MS, self._loop_check)
 
-    # ----- overtime helpers -----
+    # ---- email fan-out (async) ----
+    def _fanout_inactive_email_async(self, active_duration):
+        def _send():
+            try:
+                u = self.current_user
+                when_txt = dt.datetime.now(SHIFT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                duration_txt = seconds_to_hhmmss(active_duration) if active_duration else "unknown"
+                body = (f"User {u['name']} (@{u['username']}, {u['email']}, {u['department']}) "
+                        f"became INACTIVE at {when_txt}. Active streak: {duration_txt}.")
+                recipients = set()
+                if u.get("email"): recipients.add(u["email"])
+                recipients.update(e for e in list_admin_emails() if e)
+                if ADMIN_BOOTSTRAP.get("email"): recipients.add(ADMIN_BOOTSTRAP["email"])
+                recipients.update(ALERT_RECIPIENTS)
+                if recipients:
+                    send_email(list(recipients),
+                               subject=f"[IdleTracker] {u['username']} inactive",
+                               body=body)
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    # ---- overtime helpers ----
     def _flush_overtime_segment(self):
-        """Called when user becomes idle or app exits, to store the segment."""
         if self._overtime_started_mono is None or not self.current_user:
             return
-        seconds = int(max(0, time.monotonic() - self._overtime_started_mono))
+        now = time.monotonic()
+        seconds = int(max(0, now - self._overtime_started_mono))
         self._overtime_started_mono = None
         if seconds <= 0:
             return
         try:
-            # store as one row per day (aggregate on the backend if same day)
             ot_date = dt.datetime.now(SHIFT_TZ).date()
+            self.overtime_seconds_today += seconds
             insert_overtime(self.current_user["id"], ot_date, seconds)
-        except Exception as e:
-            print("Overtime insert failed:", e)
+            self.frames["TrackerFrame"].set_counters(
+                self.active_seconds_today,
+                self.inactive_seconds_today,
+                self.overtime_seconds_today,
+                self._today_total_seconds()
+            )
+        except Exception:
+            pass
 
-    # ----- background recording -----
+    # ---- background recording ----
     def _record_and_store(self, event_id, duration, fps):
         try:
             video_bytes = self._record_screen_bytes(duration=duration, fps=fps)
             insert_recording_url(self.current_user["id"], video_bytes,
                                  duration_seconds=duration, event_id=event_id)
-        except Exception as e:
-            print("Recording failed:", e)
+        except Exception:
+            pass
         finally:
             self._recording_in_progress = False
 
-    # ----- screenshots -----
+    # ---- screenshots ----
     def _plan_next_random_screenshot(self):
         mins = random.randint(20, 35)
         self.next_screenshot_after_ms = int(mins * 60 * 1000)
@@ -334,15 +454,16 @@ class UserApp(tk.Tk):
             buf = io.BytesIO(); img.save(buf, format="PNG")
             return buf.getvalue()
 
-    # ----- recording -----
+    # ---- recording ----
     def _record_screen_bytes(self, duration=5, fps=8):
+        # no duplicate -pix_fmt; keep faststart
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             out_path = tmp.name
         with mss.mss() as sct:
             monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
             writer = imageio.get_writer(
                 out_path, fps=fps, codec="libx264", format="FFMPEG",
-                ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+                ffmpeg_params=["-movflags", "+faststart"]
             )
             frames_needed = int(round(duration * fps))
             next_t = time.monotonic()
@@ -361,15 +482,6 @@ class UserApp(tk.Tk):
         try: os.remove(out_path)
         except Exception: pass
         return data
-
-    # ----- shutdown -----
-    def _on_close(self):
-        try:
-            self._flush_overtime_segment()
-        except Exception:
-            pass
-        if self.global_monitor: self.global_monitor.stop()
-        self.destroy()
 
 
 class AuthFrame(ttk.Frame):
@@ -399,15 +511,61 @@ class TrackerFrame(ttk.Frame):
         super().__init__(master, padding=20)
         self.status_var = tk.StringVar(value="off")
         self.idle_var = tk.StringVar(value="Idle for 0.0s")
-        ttk.Label(self, textvariable=self.status_var, font=("Segoe UI", 20, "bold")).pack(pady=(10,5))
+
+        # User details
+        self.name_var = tk.StringVar(value="")
+        self.username_var = tk.StringVar(value="")
+        self.department_var = tk.StringVar(value="")
+
+        # Counters
+        self.active_today_var = tk.StringVar(value="00:00:00")
+        self.inactive_today_var = tk.StringVar(value="00:00:00")
+        self.overtime_today_var = tk.StringVar(value="00:00:00")
+        self.total_today_var = tk.StringVar(value="00:00:00")
+
+        # Header row (fixed layout so design doesn't jump)
+        top = ttk.Frame(self); top.pack(fill="x")
+        ttk.Label(top, text="User Panel", font=("Segoe UI", 20, "bold")).pack(side="left", pady=(10,8))
+        ttk.Button(top, text="Minimize", command=self.master.iconify).pack(side="right", padx=6, pady=6)
+
+        # Details
+        details = ttk.Frame(self); details.pack(fill="x", pady=(4,10))
+        ttk.Label(details, textvariable=self.name_var, font=("Segoe UI", 11), width=50, anchor="w").pack(anchor="w")
+        ttk.Label(details, textvariable=self.username_var, font=("Segoe UI", 11), width=50, anchor="w").pack(anchor="w")
+        ttk.Label(details, textvariable=self.department_var, font=("Segoe UI", 11), width=50, anchor="w").pack(anchor="w")
+
+        ttk.Label(self, textvariable=self.status_var, font=("Segoe UI", 16, "bold")).pack(pady=(6,4))
         ttk.Label(self, textvariable=self.idle_var).pack()
-        ttk.Label(self, text="(Global detection: keyboard/mouse anywhere; TZ: Asia/Karachi)").pack(pady=(10,0))
+
+        # Counters grid with fixed widths to avoid reflow
+        grid = ttk.Frame(self); grid.pack(pady=10, fill="x")
+        def row(label, var):
+            r = ttk.Frame(grid); r.pack(fill="x", pady=2)
+            ttk.Label(r, text=label, width=18, anchor="w").pack(side="left")
+            ttk.Label(r, textvariable=var, font=("Consolas", 11, "bold"), width=12, anchor="w").pack(side="left")
+        row("Today Active:", self.active_today_var)
+        row("Today Inactive:", self.inactive_today_var)
+        row("Today Overtime:", self.overtime_today_var)
+        row("Today Total:", self.total_today_var)
+
+        ttk.Label(self, text="(Global detection: keyboard/mouse anywhere; TZ: Asia/Karachi)").pack(pady=(8,0))
+
+    def set_user_info(self, name: str, username: str, department: str):
+        self.name_var.set(f"Name: {name}")
+        self.username_var.set(f"Username: @{username}")
+        self.department_var.set(f"Department: {department}")
 
     def set_status(self, status_text: str):
         self.status_var.set(status_text)
 
     def update_idle(self, seconds: float):
         self.idle_var.set(f"Idle for {seconds:.1f}s")
+
+    def set_counters(self, active_s: int, inactive_s: int, overtime_s: int, total_s: int):
+        self.active_today_var.set(seconds_to_hhmmss(active_s))
+        self.inactive_today_var.set(seconds_to_hhmmss(inactive_s))
+        self.overtime_today_var.set(seconds_to_hhmmss(overtime_s))
+        self.total_today_var.set(seconds_to_hhmmss(total_s))
 
 
 def seconds_to_hhmmss(sec):
@@ -417,7 +575,7 @@ def seconds_to_hhmmss(sec):
 
 
 if __name__ == "__main__":
-    import logging, sys, traceback
+    import logging, traceback
     os.makedirs("logs", exist_ok=True)
     logging.basicConfig(
         filename=os.path.join("logs", "user_app.log"),
@@ -426,6 +584,7 @@ if __name__ == "__main__":
     try:
         print("Starting UserApp…")
         app = UserApp()
+        # briefly keep on top so window is visible initially
         app.after(50, lambda: (app.lift(), app.attributes("-topmost", True)))
         app.after(1000, lambda: app.attributes("-topmost", False))
         app.mainloop()
