@@ -167,7 +167,7 @@ class UserApp(tk.Tk):
     # ----- global activity handler -----
     def _on_global_activity(self):
         self.last_activity = time.monotonic()
-        # If not logged in yet, remind to login every 3s
+        # If not logged in yet, remind to login every 10s
         if self.current_user is None:
             now = time.monotonic()
             if now - self._last_login_prompt >= LOGIN_PROMPT_EVERY_S:
@@ -176,7 +176,7 @@ class UserApp(tk.Tk):
                     notification.notify(
                         title="Please log in",
                         message="Activity detected. Open the app and log in to start tracking.",
-                        timeout=2,
+                        timeout=10,
                     )
                 except Exception:
                     pass
