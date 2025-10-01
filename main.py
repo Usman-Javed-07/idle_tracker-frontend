@@ -158,11 +158,17 @@ class UserApp(tk.Tk):
         self.next_screenshot_after_ms = None
 
         # overtime window
+        self._today_shift_start = None  # NEW: store shift start
         self._today_shift_end = None
         self._overtime_started_mono = None
 
         # recording state
         self._recording_in_progress = False
+
+        # --- pre-shift gating (NEW) ---
+        self._pre_shift = False
+        self._pre_shift_win = None
+        self._pre_shift_msg = tk.StringVar(value="")
 
         # UI
         self.frames = {}
@@ -240,7 +246,9 @@ class UserApp(tk.Tk):
                 pass
 
     def _compute_today_bounds(self):
+        """Compute and store today's shift start and end in local TZ."""
         if not self.current_user:
+            self._today_shift_start = None
             self._today_shift_end = None
             return
         now_local = dt.datetime.now(SHIFT_TZ)
@@ -248,16 +256,20 @@ class UserApp(tk.Tk):
             str(self.current_user["shift_start_time"]), "%H:%M:%S").time()
         e = dt.datetime.strptime(str(self.current_user.get(
             "shift_end_time", "18:00:00")), "%H:%M:%S").time()
+
         start = dt.datetime.combine(now_local.date(), s)
         end = dt.datetime.combine(now_local.date(), e)
         if end <= start:
             end += dt.timedelta(days=1)
+
         if hasattr(SHIFT_TZ, "localize"):
             start = SHIFT_TZ.localize(start)
             end = SHIFT_TZ.localize(end)
         else:
             start = start.replace(tzinfo=SHIFT_TZ)
             end = end.replace(tzinfo=SHIFT_TZ)
+
+        self._today_shift_start = start
         self._today_shift_end = end
 
     def _today_total_seconds(self):
@@ -269,11 +281,71 @@ class UserApp(tk.Tk):
             f.pack_forget()
         self.frames[name].pack(fill="both", expand=True)
 
+    # ---- pre-shift helpers (NEW) ----
+    def _show_pre_shift_popup(self):
+        if self._pre_shift_win and tk.Toplevel.winfo_exists(self._pre_shift_win):
+            return
+        self._pre_shift_win = tk.Toplevel(self)
+        self._pre_shift_win.title("Shift not started yet")
+        self._pre_shift_win.attributes("-topmost", True)
+        self._pre_shift_win.resizable(False, False)
+        frm = ttk.Frame(self._pre_shift_win, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="You logged in before your shift time.", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(frm, textvariable=self._pre_shift_msg, wraplength=380).pack(anchor="w", pady=(8, 0))
+        ttk.Label(frm, text="Tracking will start automatically at shift time.", foreground="#666").pack(anchor="w", pady=(6, 0))
+
+        # place near main window
+        try:
+            self._pre_shift_win.update_idletasks()
+            x = self.winfo_rootx() + 40
+            y = self.winfo_rooty() + 40
+            self._pre_shift_win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _hide_pre_shift_popup(self):
+        try:
+            if self._pre_shift_win and tk.Toplevel.winfo_exists(self._pre_shift_win):
+                self._pre_shift_win.destroy()
+        except Exception:
+            pass
+        self._pre_shift_win = None
+
+    def _format_eta(self, seconds):
+        if seconds < 0:
+            seconds = 0
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+    def _start_shift_now(self):
+        # switch to Active and begin counting
+        update_user_status(self.current_user["id"], "active")
+        self.frames["TrackerFrame"].set_status("Active")
+        self.last_activity = time.monotonic()
+        self.inactive_sent = False
+        self.active_since = self.last_activity
+        self.inactive_started_mono = None
+        self._pre_shift = False
+        self._hide_pre_shift_popup()
+        # plan screenshots now that shift is valid
+        self.screenshots_taken_today = 0
+        self._plan_next_random_screenshot()
+
     # ---- activity handler ----
     def _on_global_activity(self):
         now = time.monotonic()
         self.last_activity = now
         if self.current_user is not None:
+            # block status flips before shift start
+            if self._pre_shift:
+                return
             if self.inactive_sent:
                 update_user_status(self.current_user["id"], "active")
                 self.inactive_sent = False
@@ -296,10 +368,6 @@ class UserApp(tk.Tk):
         self.overtime_seconds_today = 0
         self._last_tick = time.monotonic()
 
-        # Active immediately
-        update_user_status(self.current_user["id"], "active")
-        self.frames["TrackerFrame"].set_status("Active")
-
         # show details
         self.frames["TrackerFrame"].set_user_info(
             name=self.current_user.get("name") or "",
@@ -313,10 +381,30 @@ class UserApp(tk.Tk):
             self._today_total_seconds()
         )
 
+        now_local = dt.datetime.now(SHIFT_TZ)
+        if self._today_shift_start and now_local < self._today_shift_start:
+            # pre-shift: keep OFF, do not count anything, no overtime
+            self._pre_shift = True
+            update_user_status(self.current_user["id"], "off")
+            self.frames["TrackerFrame"].set_status("Off (shift not started)")
+            # show popup with countdown
+            remain = int((self._today_shift_start - now_local).total_seconds())
+            self._pre_shift_msg.set(
+                f"Your shift starts at {self._today_shift_start.strftime('%H:%M:%S %Z')}.\n"
+                f"Time remaining: {self._format_eta(remain)}"
+            )
+            self._show_pre_shift_popup()
+            # show panel (but paused)
+            self.show_frame("TrackerFrame")
+            return
+
+        # shift already started: go Active immediately
         self.last_activity = time.monotonic()
         self.inactive_sent = False
         self.active_since = self.last_activity
         self.inactive_started_mono = None
+        update_user_status(self.current_user["id"], "active")
+        self.frames["TrackerFrame"].set_status("Active")
         self.screenshots_taken_today = 0
         self._plan_next_random_screenshot()
         self.show_frame("TrackerFrame")
@@ -334,6 +422,19 @@ class UserApp(tk.Tk):
                 _notify(
                     "Please log in", "Open the user panel and sign in to start tracking.", timeout=10)
 
+        # --- pre-shift countdown & auto-start (NEW) ---
+        if self.current_user and self._pre_shift and self._today_shift_start:
+            now_local = dt.datetime.now(SHIFT_TZ)
+            remain = int((self._today_shift_start - now_local).total_seconds())
+            if remain <= 0:
+                self._start_shift_now()
+            else:
+                # keep the popup text fresh
+                self._pre_shift_msg.set(
+                    f"Your shift starts at {self._today_shift_start.strftime('%H:%M:%S %Z')}.\n"
+                    f"Time remaining: {self._format_eta(remain)}"
+                )
+
         # overtime window
         after_end = False
         if self.current_user:
@@ -347,7 +448,7 @@ class UserApp(tk.Tk):
         if now - self._last_tick >= 1.0:
             delta = int(now - self._last_tick)
             self._last_tick += delta
-            if self.current_user:
+            if self.current_user and not self._pre_shift:  # guard pre-shift
                 if idle < INACTIVITY_SECONDS:
                     self.active_seconds_today += delta
                     if after_end:
@@ -364,7 +465,7 @@ class UserApp(tk.Tk):
                 )
 
         # inactivity boundary (event + notification; layout won’t jump)
-        if self.current_user:
+        if self.current_user and not self._pre_shift:
             if idle >= INACTIVITY_SECONDS and not self.inactive_sent:
                 active_duration = int(
                     now - self.active_since) if self.active_since is not None else None
@@ -389,8 +490,9 @@ class UserApp(tk.Tk):
                         target=self._record_and_store, args=(event_id, 5, 8), daemon=True
                     ).start()
 
-        # random screenshots
-        self._maybe_take_random_screenshot()
+        # random screenshots (skip pre-shift)
+        if not self._pre_shift:
+            self._maybe_take_random_screenshot()
 
         self.after(CHECK_INTERVAL_MS, self._loop_check)
 
