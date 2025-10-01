@@ -678,7 +678,7 @@ class AuthFrame(ctk.CTkFrame):
         ctk.CTkLabel(inp, text="Password").pack(anchor="w")
         row = ctk.CTkFrame(inp, fg_color="transparent")
         row.pack(fill="x", pady=(2, 12))
-        self.e_pwd = ctk.CTkEntry(row, textvariable=self.login_pwd, show="•", placeholder_text="••••••••",
+        self.e_pwd = ctk.CTkEntry(row, textvariable=self.login_pwd, show="•", placeholder_text="enter password",
                                   height=40)
         self.e_pwd.pack(side="left", fill="x", expand=True)
 
