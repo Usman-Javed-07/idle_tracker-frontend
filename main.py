@@ -832,8 +832,8 @@ class TrackerFrame(ctk.CTkFrame):
     # --- Public setters used by app logic ---
     def set_user_info(self, name: str, username: str, department: str):
         self.name_var.set(f"Name: {name}")
-        self.username_var.set(f"@{username}")
-        self.department_var.set(f"{department}")
+        self.username_var.set(f"Username: @{username}")
+        self.department_var.set(f"Department: {department}")
 
     def set_status(self, status_text: str):
         self.status_var.set(status_text)
