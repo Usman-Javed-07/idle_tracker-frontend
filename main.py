@@ -11,7 +11,7 @@ import signal
 
 # --- UI: CustomTkinter ---
 import customtkinter as ctk
-import tkinter as tk  # for StringVar/messagebox
+import tkinter as tk
 from tkinter import messagebox
 
 from plyer import notification
@@ -56,31 +56,33 @@ if not os.path.isfile(APP_ICON):
     APP_ICON = None
 
 # Colors / Theme
-ctk.set_appearance_mode("System")    # "Dark" | "Light" | "System"
-ctk.set_default_color_theme("blue")  # "blue" | "green" | "dark-blue"
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
-APP_BG = ("#f5f7fb", "#0f1115")          # window background (light, dark)
-BAR_BG = ("#ffffff", "#151922")          # navbar & footer background
-CARD_BG = ("#ffffff", "#1b2030")         # cards background
+APP_BG = ("#f5f7fb", "#0f1115")
+BAR_BG = ("#ffffff", "#151922")
+CARD_BG = ("#ffffff", "#1b2030")
 MUTED_TX = ("#4b5563", "#9aa4b2")
 
 STATUS_COLORS = {
-    "Active": "#22c55e",   # green
-    "Inactive": "#ef4444", # red
-    "Off": "#000000",      # black
+    "Active": "#22c55e",
+    "Inactive": "#ef4444",
+    "Off": "#000000",
 }
 
 # Windows toast branding so it won't say "Python"
 if sys.platform.startswith("win"):
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Mars Capital")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Mars Capital")
     except Exception:
         pass
 
 
 def _notify(title, message, timeout=5):
-    kw = {"title": title, "message": message, "timeout": timeout, "app_name": APP_NAME}
+    kw = {"title": title, "message": message,
+          "timeout": timeout, "app_name": APP_NAME}
     if APP_ICON:
         kw["app_icon"] = APP_ICON
     try:
@@ -132,10 +134,9 @@ class GlobalActivityMonitor:
         except Exception:
             pass
 
-
-# =============================
 # Main Application (CustomTk)
-# =============================
+
+
 class UserApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -171,7 +172,8 @@ class UserApp(ctk.CTk):
         # time bookkeeping
         self._last_tick = time.monotonic()
 
-        self.global_monitor = GlobalActivityMonitor(self._on_global_activity, min_interval=0.15)
+        self.global_monitor = GlobalActivityMonitor(
+            self._on_global_activity, min_interval=0.15)
         self.global_monitor.start()
 
         # pre-login reminder
@@ -259,7 +261,8 @@ class UserApp(ctk.CTk):
                     ADMIN_BOOTSTRAP["email"],
                     hash_password(ADMIN_BOOTSTRAP["password"]),
                     role="admin",
-                    shift_start_time=ADMIN_BOOTSTRAP.get("shift_start_time", "09:00:00"),
+                    shift_start_time=ADMIN_BOOTSTRAP.get(
+                        "shift_start_time", "09:00:00"),
                     shift_duration_seconds=32400,
                 )
             except Exception:
@@ -271,8 +274,10 @@ class UserApp(ctk.CTk):
             self._today_shift_end = None
             return
         now_local = dt.datetime.now(SHIFT_TZ)
-        s = dt.datetime.strptime(str(self.current_user["shift_start_time"]), "%H:%M:%S").time()
-        e = dt.datetime.strptime(str(self.current_user.get("shift_end_time", "18:00:00")), "%H:%M:%S").time()
+        s = dt.datetime.strptime(
+            str(self.current_user["shift_start_time"]), "%H:%M:%S").time()
+        e = dt.datetime.strptime(str(self.current_user.get(
+            "shift_end_time", "18:00:00")), "%H:%M:%S").time()
         start = dt.datetime.combine(now_local.date(), s)
         end = dt.datetime.combine(now_local.date(), e)
         if end <= start:
@@ -335,7 +340,8 @@ class UserApp(ctk.CTk):
         self._pre_shift_win.resizable(False, False)
         self._pre_shift_win.configure(fg_color=BAR_BG)
 
-        frm = ctk.CTkFrame(self._pre_shift_win, corner_radius=10, fg_color=CARD_BG)
+        frm = ctk.CTkFrame(self._pre_shift_win,
+                           corner_radius=10, fg_color=CARD_BG)
         frm.pack(fill="both", expand=True, padx=14, pady=14)
 
         ctk.CTkLabel(frm, text="You logged in before your shift time.",
@@ -367,8 +373,10 @@ class UserApp(ctk.CTk):
         h = seconds // 3600
         m = (seconds % 3600) // 60
         s = seconds % 60
-        if h: return f"{h}h {m}m {s}s"
-        if m: return f"{m}m {s}s"
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
         return f"{s}s"
 
     def _start_shift_now(self):
@@ -460,7 +468,8 @@ class UserApp(ctk.CTk):
         if self.current_user is None:
             if now - self._last_login_prompt >= LOGIN_PROMPT_EVERY_S:
                 self._last_login_prompt = now
-                _notify("Please log in", "Open the user panel and sign in to start tracking.", timeout=10)
+                _notify(
+                    "Please log in", "Open the user panel and sign in to start tracking.", timeout=10)
 
         # pre-shift countdown & auto-start
         if self.current_user and self._pre_shift and self._today_shift_start:
@@ -480,7 +489,8 @@ class UserApp(ctk.CTk):
             if self._today_shift_end is None:
                 self._compute_today_bounds()
             now_local = dt.datetime.now(SHIFT_TZ)
-            after_end = bool(self._today_shift_end and (now_local >= self._today_shift_end))
+            after_end = bool(self._today_shift_end and (
+                now_local >= self._today_shift_end))
 
         # 1-second ticker
         if now - self._last_tick >= 1.0:
@@ -505,7 +515,8 @@ class UserApp(ctk.CTk):
         # inactivity boundary
         if self.current_user and not self._pre_shift:
             if idle >= INACTIVITY_SECONDS and not self.inactive_sent:
-                active_duration = int(now - self.active_since) if self.active_since is not None else None
+                active_duration = int(
+                    now - self.active_since) if self.active_since is not None else None
                 event_id = record_event(
                     self.current_user["id"], "inactive",
                     active_duration_seconds=active_duration
@@ -514,7 +525,8 @@ class UserApp(ctk.CTk):
                 self.inactive_sent = True
                 self.inactive_started_mono = now
                 self.frames["TrackerFrame"].set_status("Inactive")
-                _notify("You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
+                _notify(
+                    "You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
 
                 # email fan-out in background
                 self._fanout_inactive_email_async(active_duration)
@@ -537,8 +549,10 @@ class UserApp(ctk.CTk):
         def _send():
             try:
                 u = self.current_user
-                when_txt = dt.datetime.now(SHIFT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-                duration_txt = seconds_to_hhmmss(active_duration) if active_duration else "unknown"
+                when_txt = dt.datetime.now(
+                    SHIFT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                duration_txt = seconds_to_hhmmss(
+                    active_duration) if active_duration else "unknown"
                 body = (f"User {u['name']} (@{u['username']}, {u['email']}, {u['department']}) "
                         f"became INACTIVE at {when_txt}. Active streak: {duration_txt}.")
                 recipients = set()
@@ -605,7 +619,8 @@ class UserApp(ctk.CTk):
         if self.next_screenshot_after_ms <= 0:
             try:
                 img_bytes = self._capture_png_bytes()
-                insert_screenshot_url(self.current_user["id"], img_bytes, event_id=None, mime="image/png")
+                insert_screenshot_url(
+                    self.current_user["id"], img_bytes, event_id=None, mime="image/png")
                 self.screenshots_taken_today += 1
             except Exception:
                 pass
@@ -613,7 +628,8 @@ class UserApp(ctk.CTk):
 
     def _capture_png_bytes(self):
         with mss.mss() as sct:
-            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+            monitor = sct.monitors[1] if len(
+                sct.monitors) > 1 else sct.monitors[0]
             raw = sct.grab(monitor)
             img = Image.frombytes("RGB", raw.size, raw.rgb)
             buf = io.BytesIO()
@@ -625,7 +641,8 @@ class UserApp(ctk.CTk):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             out_path = tmp.name
         with mss.mss() as sct:
-            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+            monitor = sct.monitors[1] if len(
+                sct.monitors) > 1 else sct.monitors[0]
             writer = imageio.get_writer(
                 out_path, fps=fps, codec="libx264", format="FFMPEG",
                 ffmpeg_params=["-movflags", "+faststart"]
@@ -651,10 +668,9 @@ class UserApp(ctk.CTk):
             pass
         return data
 
-
-# =============================
 # Frames (CustomTk versions)
-# =============================
+
+
 class AuthFrame(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(master, corner_radius=0, fg_color=APP_BG)
@@ -662,7 +678,8 @@ class AuthFrame(ctk.CTkFrame):
         card = ctk.CTkFrame(self, corner_radius=12, fg_color=CARD_BG)
         card.pack(expand=True, fill="x", padx=28, pady=28)
 
-        ctk.CTkLabel(card, text="Login", font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(18, 6))
+        ctk.CTkLabel(card, text="Login", font=ctk.CTkFont(
+            size=22, weight="bold")).pack(pady=(18, 6))
 
         self.login_id = tk.StringVar()
         self.login_pwd = tk.StringVar()
@@ -683,12 +700,16 @@ class AuthFrame(ctk.CTkFrame):
         self.e_pwd.pack(side="left", fill="x", expand=True)
 
         def toggle_pwd():
-            self.e_pwd.configure(show="" if self.e_pwd.cget("show") == "•" else "•")
-            self.btn_toggle.configure(text=("Hide" if self.e_pwd.cget("show") == "" else "Show"))
-        self.btn_toggle = ctk.CTkButton(row, text="Show", width=72, command=toggle_pwd)
+            self.e_pwd.configure(
+                show="" if self.e_pwd.cget("show") == "•" else "•")
+            self.btn_toggle.configure(
+                text=("Hide" if self.e_pwd.cget("show") == "" else "Show"))
+        self.btn_toggle = ctk.CTkButton(
+            row, text="Show", width=72, command=toggle_pwd)
         self.btn_toggle.pack(side="left", padx=(8, 0))
 
-        ctk.CTkButton(card, text="Login", height=42, command=self.do_login).pack(pady=(6, 18), padx=20, fill="x")
+        ctk.CTkButton(card, text="Login", height=42, command=self.do_login).pack(
+            pady=(6, 18), padx=20, fill="x")
 
         # Footer brand (login page keeps same bg scheme)
         foot = ctk.CTkFrame(self, fg_color=BAR_BG, corner_radius=0)
@@ -700,9 +721,11 @@ class AuthFrame(ctk.CTkFrame):
 
     def do_login(self):
         try:
-            user = login(self.login_id.get().strip(), self.login_pwd.get().strip())
+            user = login(self.login_id.get().strip(),
+                         self.login_pwd.get().strip())
             if not user or user["role"] != "user":
-                messagebox.showerror("Login failed", "Invalid credentials or not a user.")
+                messagebox.showerror(
+                    "Login failed", "Invalid credentials or not a user.")
                 return
             self.master.on_logged_in(user)
         except Exception as e:
@@ -719,7 +742,8 @@ class TrackerFrame(ctk.CTkFrame):
 
         left = ctk.CTkFrame(nav, fg_color="transparent")
         left.pack(side="left", padx=12, pady=8)
-        ctk.CTkLabel(left, text="Mars Capital", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(left, text="Mars Capital", font=ctk.CTkFont(
+            size=16, weight="bold")).pack(anchor="w")
 
         mid = ctk.CTkFrame(nav, fg_color="transparent")
         mid.pack(side="left", padx=16, pady=8)
@@ -728,13 +752,17 @@ class TrackerFrame(ctk.CTkFrame):
         self.name_var = tk.StringVar(value="")
         self.username_var = tk.StringVar(value="")
         self.department_var = tk.StringVar(value="")
-        ctk.CTkLabel(mid, textvariable=self.name_var).pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(mid, textvariable=self.username_var, text_color=MUTED_TX).pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(mid, textvariable=self.department_var, text_color=MUTED_TX).pack(side="left")
+        ctk.CTkLabel(mid, textvariable=self.name_var).pack(
+            side="left", padx=(0, 10))
+        ctk.CTkLabel(mid, textvariable=self.username_var,
+                     text_color=MUTED_TX).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(mid, textvariable=self.department_var,
+                     text_color=MUTED_TX).pack(side="left")
 
         right = ctk.CTkFrame(nav, fg_color="transparent")
         right.pack(side="right", padx=12, pady=8)
-        ctk.CTkButton(right, text="Logout", command=self.master.logout, width=90).pack()
+        ctk.CTkButton(right, text="Logout",
+                      command=self.master.logout, width=90).pack()
 
         # ========= CONTENT =========
         content = ctk.CTkFrame(self, fg_color="transparent")
@@ -753,8 +781,10 @@ class TrackerFrame(ctk.CTkFrame):
                                        font=ctk.CTkFont(size=18, weight="bold"))
         self.status_lbl.pack(side="left")
 
-        ctk.CTkLabel(status_row, text="•").pack(side="left", padx=6)  # spacer dot
-        self.idle_lbl = ctk.CTkLabel(status_row, textvariable=self.idle_var, text_color=MUTED_TX)
+        ctk.CTkLabel(status_row, text="•").pack(
+            side="left", padx=6)  # spacer dot
+        self.idle_lbl = ctk.CTkLabel(
+            status_row, textvariable=self.idle_var, text_color=MUTED_TX)
         self.idle_lbl.pack(side="left")
 
         # Counters grid in two columns of cards
@@ -765,26 +795,31 @@ class TrackerFrame(ctk.CTkFrame):
             card = ctk.CTkFrame(parent, corner_radius=12, fg_color=CARD_BG)
             inner = ctk.CTkFrame(card, fg_color="transparent")
             inner.pack(fill="x", padx=14, pady=12)
-            ctk.CTkLabel(inner, text=title, text_color=MUTED_TX).pack(anchor="w")
+            ctk.CTkLabel(inner, text=title,
+                         text_color=MUTED_TX).pack(anchor="w")
             lbl = ctk.CTkLabel(inner, textvariable=var_stringvar,
                                font=ctk.CTkFont(family="Consolas", size=18, weight="bold"))
             lbl.pack(anchor="w")
             return card
 
-        self.active_today_var   = tk.StringVar(value="00:00:00")
+        self.active_today_var = tk.StringVar(value="00:00:00")
         self.inactive_today_var = tk.StringVar(value="00:00:00")
         self.overtime_today_var = tk.StringVar(value="00:00:00")
-        self.total_today_var    = tk.StringVar(value="00:00:00")
+        self.total_today_var = tk.StringVar(value="00:00:00")
 
         row1 = ctk.CTkFrame(grid, fg_color="transparent")
         row1.pack(fill="x")
-        c1 = metric_card(row1, "Today Active",   self.active_today_var);   c1.pack(side="left", fill="x", expand=True, padx=(0,8), pady=6)
-        c2 = metric_card(row1, "Today Inactive", self.inactive_today_var); c2.pack(side="left", fill="x", expand=True, padx=(8,0), pady=6)
+        c1 = metric_card(row1, "Today Active",   self.active_today_var)
+        c1.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
+        c2 = metric_card(row1, "Today Inactive", self.inactive_today_var)
+        c2.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=6)
 
         row2 = ctk.CTkFrame(grid, fg_color="transparent")
         row2.pack(fill="x")
-        c3 = metric_card(row2, "Today Overtime", self.overtime_today_var); c3.pack(side="left", fill="x", expand=True, padx=(0,8), pady=6)
-        c4 = metric_card(row2, "Today Total",    self.total_today_var);    c4.pack(side="left", fill="x", expand=True, padx=(8,0), pady=6)
+        c3 = metric_card(row2, "Today Overtime", self.overtime_today_var)
+        c3.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
+        c4 = metric_card(row2, "Today Total",    self.total_today_var)
+        c4.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=6)
 
         # ========= FOOTER =========
         foot = ctk.CTkFrame(self, fg_color=BAR_BG, corner_radius=0)
