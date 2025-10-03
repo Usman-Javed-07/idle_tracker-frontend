@@ -688,7 +688,7 @@ class AuthFrame(ctk.CTkFrame):
         inp.pack(fill="x", padx=20, pady=8)
 
         ctk.CTkLabel(inp, text="Username or Email").pack(anchor="w")
-        self.e_user = ctk.CTkEntry(inp, textvariable=self.login_id, placeholder_text="yourname or you@example.com",
+        self.e_user = ctk.CTkEntry(inp, textvariable=self.login_id, placeholder_text="Enter username or email",
                                    height=40)
         self.e_user.pack(fill="x", pady=(2, 8))
 
