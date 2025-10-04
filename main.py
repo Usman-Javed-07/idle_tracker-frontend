@@ -1,3 +1,4 @@
+# --- SNIP (imports & constants remain the same) ---
 import io
 import os
 import random
@@ -162,7 +163,7 @@ class UserApp(ctk.CTk):
         self.last_activity = time.monotonic()
         self.inactive_sent = False
         self.active_since = None
-        self.inactive_started_mono = None
+        self.inactive_started_mono = None  # <-- start time of inactive streak
 
         # today counters (seconds)
         self.active_seconds_today = 0
@@ -399,6 +400,17 @@ class UserApp(ctk.CTk):
             if self._pre_shift:
                 return
             if self.inactive_sent:
+                # User returns from inactivity -> record an 'active' event
+                inactive_duration = int(now - (self.inactive_started_mono or now))
+                try:
+                    record_event(
+                        self.current_user["id"],
+                        "active",
+                        active_duration_seconds=inactive_duration  # reuse field to store inactive streak length
+                    )
+                except Exception:
+                    pass
+
                 update_user_status(self.current_user["id"], "active")
                 self.inactive_sent = False
                 self.active_since = now
@@ -523,7 +535,7 @@ class UserApp(ctk.CTk):
                 )
                 update_user_status(self.current_user["id"], "inactive")
                 self.inactive_sent = True
-                self.inactive_started_mono = now
+                self.inactive_started_mono = now  # <-- mark start of inactive streak
                 self.frames["TrackerFrame"].set_status("Inactive")
                 _notify(
                     "You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
@@ -667,6 +679,9 @@ class UserApp(ctk.CTk):
         except Exception:
             pass
         return data
+
+# Frames (CustomTk versions)
+# --- remainder unchanged (AuthFrame, TrackerFrame, seconds_to_hhmmss, __main__) ---
 
 # Frames (CustomTk versions)
 
