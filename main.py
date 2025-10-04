@@ -134,7 +134,6 @@ class GlobalActivityMonitor:
                 self._key_listener.stop()
         except Exception:
             pass
-
 # Main Application (CustomTk)
 
 
@@ -404,23 +403,31 @@ class UserApp(ctk.CTk):
         if self.current_user is not None:
             if self._pre_shift:
                 return
-            if self.inactive_sent:
-                # User returns from inactivity -> record an 'active' event
-                inactive_duration = int(now - (self.inactive_started_mono or now))
-                try:
-                    record_event(
-                        self.current_user["id"],
-                        "active",
-                        active_duration_seconds=inactive_duration  # reuse field to store inactive streak length
-                    )
-                except Exception:
-                    pass
 
+            # If we've crossed shift end, treat return-to-activity only for UI & overtime
+            after_end = False
+            if self._today_shift_end is not None:
+                now_local = dt.datetime.now(SHIFT_TZ)
+                after_end = now_local >= self._today_shift_end
+
+            if self.inactive_sent:
+                if not after_end:
+                    # Only record 'active' event if still within shift
+                    inactive_duration = int(now - (self.inactive_started_mono or now))
+                    try:
+                        record_event(
+                            self.current_user["id"],
+                            "active",
+                            active_duration_seconds=inactive_duration
+                        )
+                    except Exception:
+                        pass
                 update_user_status(self.current_user["id"], "active")
                 self.inactive_sent = False
                 self.active_since = now
                 self.inactive_started_mono = None
-                self.frames["TrackerFrame"].set_status("Active")
+                self.frames["TrackerFrame"].set_status(
+                    "Active (Overtime)" if after_end else "Active")
             elif self.active_since is None:
                 update_user_status(self.current_user["id"], "active")
                 self.active_since = now
@@ -500,46 +507,61 @@ class UserApp(ctk.CTk):
                     f"Time remaining: {self._format_eta(remain)}"
                 )
 
-        # overtime window
+        # are we past shift end?
         after_end = False
         if self.current_user:
             if self._today_shift_end is None:
                 self._compute_today_bounds()
             now_local = dt.datetime.now(SHIFT_TZ)
-            after_end = bool(self._today_shift_end and (
-                now_local >= self._today_shift_end))
+            after_end = bool(self._today_shift_end and (now_local >= self._today_shift_end))
 
         # 1-second ticker
         if now - self._last_tick >= 1.0:
             delta = int(now - self._last_tick)
             self._last_tick += delta
             if self.current_user and not self._pre_shift:
-                if idle < INACTIVITY_SECONDS:
-                    self.active_seconds_today += delta
-                    if after_end:
-                        self.overtime_seconds_today += delta
+                if not after_end:
+                    # Normal shift window: Active/Inactive work as before
+                    if idle < INACTIVITY_SECONDS:
+                        self.active_seconds_today += delta
+                    else:
+                        self.inactive_seconds_today += delta
                 else:
-                    self.inactive_seconds_today += delta
+                    # AFTER SHIFT END: Do not count active/inactive at all.
+                    # Only count overtime *and only if user is not idle*.
+                    if idle < INACTIVITY_SECONDS:
+                        self.overtime_seconds_today += delta
 
                 tf = self.frames["TrackerFrame"]
+                if after_end:
+                    # Show Shift-End behavior
+                    total_for_ui = self.overtime_seconds_today if (idle < INACTIVITY_SECONDS) else self.overtime_seconds_today
+                    # If idle after shift end, status is "Shift End"
+                    if idle >= INACTIVITY_SECONDS:
+                        tf.set_status("Shift End")
+                    else:
+                        tf.set_status("Active (Overtime)")
+                else:
+                    total_for_ui = self._today_total_seconds()
+
                 tf.set_counters(
                     self.active_seconds_today,
                     self.inactive_seconds_today,
                     self.overtime_seconds_today,
-                    self._today_total_seconds()
+                    total_for_ui
                 )
+
+        # overtime segment management (only while active after shift end)
         if self.current_user and not self._pre_shift:
             if after_end and idle < INACTIVITY_SECONDS:
-                # We are in overtime and active → ensure segment started
                 if self._overtime_started_mono is None:
                     self._overtime_started_mono = now
             else:
-                # Either not after shift end OR not active → flush any open segment
                 if self._overtime_started_mono is not None:
-                    self._flush_overtime_segment()        
+                    self._flush_overtime_segment()
 
-        # inactivity boundary
-        if self.current_user and not self._pre_shift:
+        # inactivity boundary (NO events after shift end)
+        if self.current_user and not self._pre_shift and not after_end:
             if idle >= INACTIVITY_SECONDS and not self.inactive_sent:
                 active_duration = int(
                     now - self.active_since) if self.active_since is not None else None
@@ -549,16 +571,13 @@ class UserApp(ctk.CTk):
                 )
                 update_user_status(self.current_user["id"], "inactive")
                 self.inactive_sent = True
-                self.inactive_started_mono = now  # <-- mark start of inactive streak
+                self.inactive_started_mono = now
                 self.frames["TrackerFrame"].set_status("Inactive")
                 _notify(
                     "You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
-                
+
                 if self._overtime_started_mono is not None:
                     self._flush_overtime_segment()
-                    
-                # email fan-out in background
-                self._fanout_inactive_email_async(active_duration)
 
                 # short recording (non-blocking)
                 if not self._recording_in_progress:
@@ -567,8 +586,8 @@ class UserApp(ctk.CTk):
                         target=self._record_and_store, args=(event_id, 5, 8), daemon=True
                     ).start()
 
-        # random screenshots
-        if not self._pre_shift:
+        # random screenshots (skip after shift end)
+        if not self._pre_shift and not after_end:
             self._maybe_take_random_screenshot()
 
         self.after(CHECK_INTERVAL_MS, self._loop_check)
@@ -616,7 +635,7 @@ class UserApp(ctk.CTk):
                 self.active_seconds_today,
                 self.inactive_seconds_today,
                 self.overtime_seconds_today,
-                self._today_total_seconds()
+                self.overtime_seconds_today  # after shift end the total on UI reflects overtime only
             )
         except Exception:
             pass
@@ -696,7 +715,6 @@ class UserApp(ctk.CTk):
         except Exception:
             pass
         return data
-
 # Frames (CustomTk versions)
 # --- remainder unchanged (AuthFrame, TrackerFrame, seconds_to_hhmmss, __main__) ---
 
@@ -762,7 +780,6 @@ class AuthFrame(ctk.CTkFrame):
             self.master.on_logged_in(user)
         except Exception as e:
             messagebox.showerror("Error", str(e))
-
 
 class TrackerFrame(ctk.CTkFrame):
     def __init__(self, master):
@@ -870,9 +887,12 @@ class TrackerFrame(ctk.CTkFrame):
     def set_status(self, status_text: str):
         self.status_var.set(status_text)
         # Color by status
-        if status_text.lower().startswith("active"):
+        st = status_text.lower()
+        if st.startswith("active"):
             color = STATUS_COLORS["Active"]
-        elif status_text.lower().startswith("inactive"):
+        elif st.startswith("inactive"):
+            color = STATUS_COLORS["Inactive"]
+        elif "shift end" in st:
             color = STATUS_COLORS["Inactive"]
         else:
             color = STATUS_COLORS["Off"]
@@ -888,6 +908,11 @@ class TrackerFrame(ctk.CTkFrame):
         self.total_today_var.set(seconds_to_hhmmss(total_s))
 
 
+
+
+
+
+# 
 def seconds_to_hhmmss(sec):
     if sec is None:
         return "00:00:00"
