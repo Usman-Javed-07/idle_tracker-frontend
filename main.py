@@ -304,6 +304,11 @@ class UserApp(ctk.CTk):
     # ---- logout ----
     def logout(self):
         try:
+            # FLUSH any in-progress overtime when logging out
+            self._flush_overtime_segment()
+        except Exception:
+            pass
+        try:
             if self.current_user:
                 update_user_status(self.current_user["id"], "off")
         except Exception:
@@ -523,6 +528,15 @@ class UserApp(ctk.CTk):
                     self.overtime_seconds_today,
                     self._today_total_seconds()
                 )
+        if self.current_user and not self._pre_shift:
+            if after_end and idle < INACTIVITY_SECONDS:
+                # We are in overtime and active → ensure segment started
+                if self._overtime_started_mono is None:
+                    self._overtime_started_mono = now
+            else:
+                # Either not after shift end OR not active → flush any open segment
+                if self._overtime_started_mono is not None:
+                    self._flush_overtime_segment()        
 
         # inactivity boundary
         if self.current_user and not self._pre_shift:
@@ -539,7 +553,10 @@ class UserApp(ctk.CTk):
                 self.frames["TrackerFrame"].set_status("Inactive")
                 _notify(
                     "You are inactive", f"No activity for {INACTIVITY_SECONDS} seconds.", timeout=3)
-
+                
+                if self._overtime_started_mono is not None:
+                    self._flush_overtime_segment()
+                    
                 # email fan-out in background
                 self._fanout_inactive_email_async(active_duration)
 
