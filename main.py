@@ -9,6 +9,7 @@ import threading
 import sys
 import atexit
 import signal
+import requests
 
 # --- UI: CustomTkinter ---
 import customtkinter as ctk
@@ -22,6 +23,10 @@ import numpy as np
 from PIL import Image
 import mss
 import imageio
+
+
+MEDIA_NODE_BASE = os.getenv("MEDIA_NODE_BASE", "http://127.0.0.1:4000").rstrip("/")
+MEDIA_NODE_API_KEY = os.getenv("MEDIA_NODE_API_KEY", "")
 
 # timezone
 try:
