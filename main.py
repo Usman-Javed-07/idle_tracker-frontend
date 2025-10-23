@@ -24,10 +24,35 @@ from PIL import Image
 import mss
 import imageio
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
-MEDIA_NODE_BASE = os.getenv("MEDIA_NODE_BASE", "http://127.0.0.1:4000").rstrip("/")
-MEDIA_NODE_API_KEY = os.getenv("MEDIA_NODE_API_KEY", "")
+# add with your imports, after imageio import
+import imageio
+try:
+    import imageio_ffmpeg
+    import os as _os
+    _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    _os.environ["IMAGEIO_FFMPEG_EXE"] = _ffmpeg_exe
+    print("[debug] FFmpeg exe:", _ffmpeg_exe, flush=True)
+except Exception as _e:
+    print("[debug] imageio-ffmpeg not available:", _e, flush=True)
 
+
+MEDIA_NODE_BASE = os.getenv("MEDIA_NODE_BASE", "http://localhost:4000").rstrip("/")
+MEDIA_NODE_API_KEY = os.getenv("MEDIA_NODE_API_KEY", "supersecret123")
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+_SESSION = requests.Session()
+_SESSION.trust_env = False  # ignore HTTP(S)_PROXY envs
 # timezone
 try:
     from zoneinfo import ZoneInfo
@@ -39,7 +64,7 @@ except Exception:
 from backend.models import (
     init_tables, get_user_by_username_or_email, insert_user, get_user_by_id,
     update_user_status, record_event,
-    insert_screenshot_url, insert_recording_url,
+    # insert_screenshot_url, insert_recording_url,
     list_admin_emails, insert_overtime,
 )
 from backend.auth import login, hash_password
@@ -84,8 +109,6 @@ if sys.platform.startswith("win"):
             "Mars Capital")
     except Exception:
         pass
-
-
 def _notify(title, message, timeout=5):
     kw = {"title": title, "message": message,
           "timeout": timeout, "app_name": APP_NAME}
@@ -94,7 +117,75 @@ def _notify(title, message, timeout=5):
     try:
         notification.notify(**kw)
     except Exception:
-        pass
+        pass    
+    
+def _post_media(endpoint: str, file_tuple, data: dict):
+    url = f"{MEDIA_NODE_BASE}{endpoint}"
+    headers = {}
+    if MEDIA_NODE_API_KEY:
+        headers["X-API-KEY"] = MEDIA_NODE_API_KEY
+
+    # LOUD debug so you always see what's happening
+    print(f"[debug] POST {url}", flush=True)
+    print(f"[debug] fields={ {k:v for k,v in data.items() if k!='file'} }", flush=True)
+    try:
+        r = _SESSION.post(
+            url,
+            headers=headers,
+            data=data,
+            files={"file": file_tuple},
+            timeout=60
+        )
+        print("[debug] Node status:", r.status_code, flush=True)
+        # show first 300 chars always; helps catch HTML error bodies
+        body_preview = (r.text or "")[:300]
+        print("[debug] Node body (trunc):", body_preview, flush=True)
+        r.raise_for_status()
+        j = r.json()
+        if not j.get("success"):
+            raise RuntimeError(f"Upload failed: {j}")
+        return j["item"]["url"]
+    except Exception as e:
+        import traceback
+        print("[debug] uploader error:", e, flush=True)
+        traceback.print_exc()
+        raise
+
+def upload_screenshot_to_node(*, image_bytes: bytes, email: str = None, username: str = None, user_id: int = None, event_id=None, mime="image/png") -> str:
+    """
+    Send either email or username (preferred), or user_id if you already have it.
+    """
+    file_tuple = ("screenshot.png", io.BytesIO(image_bytes), mime or "image/png")
+    data = {
+        "mime": mime or "image/png",
+        "event_id": "" if event_id is None else str(event_id),
+    }
+    if email: data["email"] = str(email)
+    if username: data["username"] = str(username)
+    if user_id is not None: data["user_id"] = str(user_id)
+    return _post_media("/api/v1/media/upload-screenshot", file_tuple, data)
+
+def upload_recording_to_node(*, video_bytes: bytes, duration_seconds=None, email: str = None, username: str = None, user_id: int = None, event_id=None, mime="video/mp4") -> str:
+    """
+    Send either email or username (preferred), or user_id if you already have it.
+    """
+    file_tuple = ("recording.mp4", io.BytesIO(video_bytes), mime or "video/mp4")
+    data = {
+        "mime": mime or "video/mp4",
+        "duration_seconds": "" if duration_seconds is None else str(duration_seconds),
+        "event_id": "" if event_id is None else str(event_id),
+    }
+    if email: data["email"] = str(email)
+    if username: data["username"] = str(username)
+    if user_id is not None: data["user_id"] = str(user_id)
+    return _post_media("/api/v1/media/upload-recording", file_tuple, data)    
+
+def _debug_force_record_upload(self):
+    print("[debug] forcing one test recording+upload...", flush=True)
+    data = self._record_screen_bytes(duration=3, fps=8)
+    print("[debug] forced test completed, size:", len(data), flush=True)
+
+
 
 
 class GlobalActivityMonitor:
@@ -648,14 +739,27 @@ class UserApp(ctk.CTk):
     # ---- background recording ----
     def _record_and_store(self, event_id, duration, fps):
         try:
+            print(f"[debug] _record_and_store ENTER (duration={duration}, fps={fps})", flush=True)
             video_bytes = self._record_screen_bytes(duration=duration, fps=fps)
-            insert_recording_url(self.current_user["id"], video_bytes,
-                                 duration_seconds=duration, event_id=event_id)
-        except Exception:
-            pass
+            print("[debug] _record_and_store got bytes:", len(video_bytes), flush=True)
+
+            url = upload_recording_to_node(
+                video_bytes=video_bytes,
+                duration_seconds=duration,
+                user_id=self.current_user["id"],
+                event_id=event_id,
+                mime="video/mp4",
+            )
+            print("[debug] Node stored recording URL:", url, flush=True)
+
+        except Exception as e:
+            import traceback
+            print("[debug] _record_and_store ERROR:", e, flush=True)
+            traceback.print_exc()
         finally:
             self._recording_in_progress = False
-
+    
+            
     # ---- screenshots ----
     def _plan_next_random_screenshot(self):
         mins = random.randint(20, 35)
@@ -671,10 +775,20 @@ class UserApp(ctk.CTk):
         self.next_screenshot_after_ms -= CHECK_INTERVAL_MS
         if self.next_screenshot_after_ms <= 0:
             try:
+                # img_bytes = self._capture_png_bytes()
+                # insert_screenshot_url(
+                #     self.current_user["id"], img_bytes, event_id=None, mime="image/png")
+                # self.screenshots_taken_today += 1
                 img_bytes = self._capture_png_bytes()
-                insert_screenshot_url(
-                    self.current_user["id"], img_bytes, event_id=None, mime="image/png")
-                self.screenshots_taken_today += 1
+# Upload to Node and ignore returned URL if you don't need it here
+                _ = upload_screenshot_to_node(
+                    image_bytes=img_bytes,
+                    user_id=self.current_user["id"],
+                    event_id=None,
+                    mime="image/png",
+                )
+
+
             except Exception:
                 pass
             self._plan_next_random_screenshot()
@@ -691,35 +805,127 @@ class UserApp(ctk.CTk):
 
     # ---- recording ----
     def _record_screen_bytes(self, duration=5, fps=8):
+        """Record for a few seconds and return MP4 bytes."""
+        import tempfile, time, numpy as np, mss, os
+        from PIL import Image
+        import imageio
+
+        print(f"[debug] _record_screen_bytes ENTER (duration={duration}, fps={fps})", flush=True)
+
+        # create temp .mp4 path
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            out_path = tmp.name
+
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                # create writer – this is where ffmpeg/codec issues show up
+                try:
+                    writer = imageio.get_writer(
+                        out_path,
+                        fps=fps,
+                        codec="libx264",
+                        format="FFMPEG",
+                        ffmpeg_params=["-movflags", "+faststart"],
+                    )
+                    print("[debug] writer created (libx264/mp4)", flush=True)
+                except Exception as e:
+                    print("[debug] get_writer failed (libx264). If you see this, check ffmpeg install.", flush=True)
+                    raise
+
+                frames_needed = int(round(duration * fps))
+                next_t = time.monotonic()
+                try:
+                    for i in range(frames_needed):
+                        frame_bgra = np.array(sct.grab(monitor))
+                        frame_rgb = frame_bgra[:, :, :3][:, :, ::-1]  # BGRA → RGB
+                        writer.append_data(frame_rgb)
+                        next_t += 1.0 / fps
+                        sleep_for = next_t - time.monotonic()
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                    print(f"[debug] wrote {frames_needed} frames", flush=True)
+                finally:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+
+            # read back
+            with open(out_path, "rb") as f:
+                data = f.read()
+            print("[debug] recorded bytes length:", len(data), flush=True)
+            if not data:
+                raise RuntimeError("Recording produced 0 bytes. Likely ffmpeg/codec issue.")
+
+            return data
+
+        except Exception as e:
+            import traceback
+            print("[debug] _record_screen_bytes ERROR:", e, flush=True)
+            traceback.print_exc()
+            raise
+        finally:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _standalone_record_and_upload(*, email=None, username=None, user_id=None, duration=3, fps=8):
+        """
+        Minimal tester that records once and uploads to Node without hard-coding user_id.
+        Pass identity via email/username/user_id.
+        Example: UserApp._standalone_record_and_upload(email="user@example.com")
+        """
+        import tempfile, time, numpy as np, mss, imageio, os, sys
+
+        print("[debug] STANDALONE tester starting...", flush=True)
+
+        # record to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             out_path = tmp.name
         with mss.mss() as sct:
-            monitor = sct.monitors[1] if len(
-                sct.monitors) > 1 else sct.monitors[0]
+            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
             writer = imageio.get_writer(
                 out_path, fps=fps, codec="libx264", format="FFMPEG",
                 ffmpeg_params=["-movflags", "+faststart"]
             )
-            frames_needed = int(round(duration * fps))
-            next_t = time.monotonic()
-            try:
-                for _ in range(frames_needed):
-                    frame_bgra = np.array(sct.grab(monitor))
-                    frame_rgb = frame_bgra[:, :, :3][:, :, ::-1]
-                    writer.append_data(frame_rgb)
-                    next_t += 1.0 / fps
-                    sleep_for = next_t - time.monotonic()
-                    if sleep_for > 0:
-                        time.sleep(sleep_for)
-            finally:
-                writer.close()
+            for _ in range(int(round(duration * fps))):
+                frame_bgra = np.array(sct.grab(monitor))
+                frame_rgb = frame_bgra[:, :, :3][:, :, ::-1]
+                writer.append_data(frame_rgb)
+                time.sleep(1.0 / fps)
+            writer.close()
+
         with open(out_path, "rb") as f:
             data = f.read()
         try:
             os.remove(out_path)
         except Exception:
             pass
-        return data
+
+        print("[debug] standalone bytes:", len(data), flush=True)
+        ident = {}
+        if email: ident["email"] = str(email)
+        elif username: ident["username"] = str(username)
+        elif user_id is not None: ident["user_id"] = int(user_id)
+        print("[debug] standalone identity:", ident, flush=True)
+
+        url = upload_recording_to_node(
+            video_bytes=data,
+            duration_seconds=duration,
+            mime="video/mp4",
+            **ident
+        )
+        print("[debug] standalone upload URL:", url, flush=True)
+
+    # Temporarily call:
+    # _standalone_record_and_upload()
+
+        
+
+    
 # Frames (CustomTk versions)
 # --- remainder unchanged (AuthFrame, TrackerFrame, seconds_to_hhmmss, __main__) ---
 
@@ -942,6 +1148,7 @@ if __name__ == "__main__":
         app.after(50, lambda: (app.lift(), app.attributes("-topmost", True)))
         app.after(1000, lambda: app.attributes("-topmost", False))
         app.mainloop()
+        app._debug_force_record_upload()
     except Exception:
         tb = traceback.format_exc()
         logging.error(tb)
