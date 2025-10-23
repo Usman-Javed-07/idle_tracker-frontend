@@ -185,9 +185,6 @@ def _debug_force_record_upload(self):
     data = self._record_screen_bytes(duration=3, fps=8)
     print("[debug] forced test completed, size:", len(data), flush=True)
 
-
-
-
 class GlobalActivityMonitor:
     def __init__(self, on_activity, min_interval=0.15):
         self.on_activity = on_activity
@@ -231,7 +228,6 @@ class GlobalActivityMonitor:
         except Exception:
             pass
 # Main Application (CustomTk)
-
 
 class UserApp(ctk.CTk):
     def __init__(self):
@@ -920,16 +916,6 @@ class UserApp(ctk.CTk):
         )
         print("[debug] standalone upload URL:", url, flush=True)
 
-    # Temporarily call:
-    # _standalone_record_and_upload()
-
-        
-
-    
-# Frames (CustomTk versions)
-# --- remainder unchanged (AuthFrame, TrackerFrame, seconds_to_hhmmss, __main__) ---
-
-# Frames (CustomTk versions)
 
 
 class AuthFrame(ctk.CTkFrame):
@@ -1117,11 +1103,6 @@ class TrackerFrame(ctk.CTkFrame):
         self.inactive_today_var.set(seconds_to_hhmmss(inactive_s))
         self.overtime_today_var.set(seconds_to_hhmmss(overtime_s))
         self.total_today_var.set(seconds_to_hhmmss(total_s))
-
-
-
-
-
 
 # 
 def seconds_to_hhmmss(sec):
