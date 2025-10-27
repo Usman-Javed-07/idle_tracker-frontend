@@ -119,42 +119,22 @@ def _notify(title, message, timeout=5):
     except Exception:
         pass    
     
-def _post_media(endpoint: str, file_tuple, data: dict):
-    url = f"{MEDIA_NODE_BASE}{endpoint}"
-    headers = {}
-    if MEDIA_NODE_API_KEY:
-        headers["X-API-KEY"] = MEDIA_NODE_API_KEY
-
-    # LOUD debug so you always see what's happening
-    print(f"[debug] POST {url}", flush=True)
-    print(f"[debug] fields={ {k:v for k,v in data.items() if k!='file'} }", flush=True)
-    try:
-        r = _SESSION.post(
-            url,
-            headers=headers,
-            data=data,
-            files={"file": file_tuple},
-            timeout=60
-        )
-        print("[debug] Node status:", r.status_code, flush=True)
-        # show first 300 chars always; helps catch HTML error bodies
-        body_preview = (r.text or "")[:300]
-        print("[debug] Node body (trunc):", body_preview, flush=True)
+def _post_media(path, file_tuple, data):
+    url = f"{MEDIA_NODE_BASE.rstrip('/')}{path}"
+    r = requests.post(
+        url,
+        files={"file": file_tuple},
+        data=data,
+        headers={"x-api-key": MEDIA_NODE_API_KEY},
+        timeout=30,
+    )
+    if not r.ok:
+        print("[server]", r.text)
         r.raise_for_status()
-        j = r.json()
-        if not j.get("success"):
-            raise RuntimeError(f"Upload failed: {j}")
-        return j["item"]["url"]
-    except Exception as e:
-        import traceback
-        print("[debug] uploader error:", e, flush=True)
-        traceback.print_exc()
-        raise
+    return r.json().get("url")
 
-def upload_screenshot_to_node(*, image_bytes: bytes, email: str = None, username: str = None, user_id: int = None, event_id=None, mime="image/png") -> str:
-    """
-    Send either email or username (preferred), or user_id if you already have it.
-    """
+def upload_screenshot_to_node(*, image_bytes: bytes, email: str = None, username: str = None,
+                              user_id: int = None, event_id=None, mime="image/png") -> str:
     file_tuple = ("screenshot.png", io.BytesIO(image_bytes), mime or "image/png")
     data = {
         "mime": mime or "image/png",
@@ -163,12 +143,12 @@ def upload_screenshot_to_node(*, image_bytes: bytes, email: str = None, username
     if email: data["email"] = str(email)
     if username: data["username"] = str(username)
     if user_id is not None: data["user_id"] = str(user_id)
-    return _post_media("/api/v1/media/upload-screenshot", file_tuple, data)
+    # NOTE: agent endpoint
+    return _post_media("/api/v1/media/agent/upload-screenshot", file_tuple, data)
 
-def upload_recording_to_node(*, video_bytes: bytes, duration_seconds=None, email: str = None, username: str = None, user_id: int = None, event_id=None, mime="video/mp4") -> str:
-    """
-    Send either email or username (preferred), or user_id if you already have it.
-    """
+def upload_recording_to_node(*, video_bytes: bytes, duration_seconds=None, email: str = None,
+                             username: str = None, user_id: int = None, event_id=None,
+                             mime="video/mp4") -> str:
     file_tuple = ("recording.mp4", io.BytesIO(video_bytes), mime or "video/mp4")
     data = {
         "mime": mime or "video/mp4",
@@ -178,7 +158,10 @@ def upload_recording_to_node(*, video_bytes: bytes, duration_seconds=None, email
     if email: data["email"] = str(email)
     if username: data["username"] = str(username)
     if user_id is not None: data["user_id"] = str(user_id)
-    return _post_media("/api/v1/media/upload-recording", file_tuple, data)    
+    # NOTE: agent endpoint
+    return _post_media("/api/v1/media/agent/upload-recording", file_tuple, data)
+
+
 
 def _debug_force_record_upload(self):
     print("[debug] forcing one test recording+upload...", flush=True)
