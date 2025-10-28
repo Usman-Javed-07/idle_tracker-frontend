@@ -376,39 +376,73 @@ class UserApp(ctk.CTk):
         self.frames[name].pack(fill="both", expand=True)
 
     # ---- logout ----
-    def logout(self):
+        # ---- logout gating ----
+    def try_logout(self):
+        """Block logout during shift window; allow after shift end (or if no user)."""
+        if not self.current_user:
+            return self.logout()
+
+        # Ensure we have fresh bounds
+        if self._today_shift_start is None or self._today_shift_end is None:
+            self._compute_today_bounds()
+
+        now_local = dt.datetime.now(SHIFT_TZ)
+
+        in_shift = False
+        if self._today_shift_start and self._today_shift_end:
+            in_shift = self._today_shift_start <= now_local < self._today_shift_end
+
+        # If user is in pre-shift holding state, allow logout freely
+        if self._pre_shift:
+            return self.logout()
+
+        # Block logout during the shift window
+        if in_shift:
+            self._show_logout_block_modal()
+            return
+
+        # After shift end (or no bounds) — allow logout
+        return self.logout()
+
+    def _show_logout_block_modal(self):
+        """Small modal to inform the user logout is not allowed during shift."""
+        win = ctk.CTkToplevel(self)
+        win.title("Logout not allowed")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(fg_color=BAR_BG)
+
+        frm = ctk.CTkFrame(win, corner_radius=12, fg_color=CARD_BG)
+        frm.pack(fill="both", expand=True, padx=16, pady=16)
+
+        msg_lines = ["You cannot log out during your scheduled shift."]
+        if self._today_shift_end:
+            msg_lines.append(
+                f"Please try again after {self._today_shift_end.strftime('%H:%M:%S %Z')}."
+            )
+
+        ctk.CTkLabel(
+            frm,
+            text="Shift logout is blocked",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            frm,
+            text="\n".join(msg_lines),
+            justify="left"
+        ).pack(anchor="w", pady=(8, 12))
+
+        ctk.CTkButton(frm, text="OK", width=90, command=win.destroy).pack(anchor="e")
+
+        # position near main window
         try:
-            # FLUSH any in-progress overtime when logging out
-            self._flush_overtime_segment()
+            self.update_idletasks()
+            x = self.winfo_rootx() + 60
+            y = self.winfo_rooty() + 60
+            win.geometry(f"+{x}+{y}")
         except Exception:
             pass
-        try:
-            if self.current_user:
-                update_user_status(self.current_user["id"], "off")
-        except Exception:
-            pass
-        # reset runtime state
-        self.current_user = None
-        self.last_activity = time.monotonic()
-        self.inactive_sent = False
-        self.active_since = None
-        self.inactive_started_mono = None
-        self.active_seconds_today = 0
-        self.inactive_seconds_today = 0
-        self.overtime_seconds_today = 0
-        self._today_shift_start = None
-        self._today_shift_end = None
-        self._overtime_started_mono = None
-        self.screenshots_taken_today = 0
-        self.next_screenshot_after_ms = None
-        self._pre_shift = False
-        try:
-            if self._pre_shift_win:
-                self._pre_shift_win.destroy()
-        except Exception:
-            pass
-        # back to login
-        self.show_frame("AuthFrame")
 
     # ---- pre-shift helpers ----
     def _show_pre_shift_popup(self):
@@ -991,7 +1025,7 @@ class TrackerFrame(ctk.CTkFrame):
         right = ctk.CTkFrame(nav, fg_color="transparent")
         right.pack(side="right", padx=12, pady=8)
         ctk.CTkButton(right, text="Logout",
-                      command=self.master.logout, width=90).pack()
+                      command=self.master.try_logout, width=90).pack()
 
         # ========= CONTENT =========
         content = ctk.CTkFrame(self, fg_color="transparent")
