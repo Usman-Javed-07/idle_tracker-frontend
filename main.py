@@ -376,7 +376,93 @@ class UserApp(ctk.CTk):
         self.frames[name].pack(fill="both", expand=True)
 
     # ---- logout ----
-        # ---- logout gating ----
+    
+    def logout(self):
+        """
+        End the current session and return to the login screen (if present).
+        Safe to call even if parts of state/UI aren't initialized.
+        """
+        # 1) Tell backend "user is off" (if you have such a function)
+        try:
+            if getattr(self, "current_user", None):
+                # replace with your own status updater if you have it
+                if hasattr(self, "update_user_status"):
+                    self.update_user_status(self.current_user.get("id"), "off")
+                elif "update_user_status" in globals():
+                    globals()["update_user_status"](self.current_user.get("id"), "off")
+        except Exception:
+            pass  # don't block logout on backend hiccups
+
+        # 2) Stop any background workers/timers if you use them
+        try:
+            if hasattr(self, "global_monitor") and hasattr(self.global_monitor, "stop"):
+                self.global_monitor.stop()
+        except Exception:
+            pass
+        try:
+            # cancel Tkinter after-jobs you might have saved
+            for job_attr in ("_tick_job", "_poll_job", "_screenshot_job", "_heartbeat_job"):
+                job_id = getattr(self, job_attr, None)
+                if job_id:
+                    self.after_cancel(job_id)
+                    setattr(self, job_attr, None)
+        except Exception:
+            pass
+
+        # 3) Reset in-memory session flags
+        try:
+            import time as _time
+            self.current_user = None
+            self._pre_shift = False
+            self._today_shift_start = None
+            self._today_shift_end = None
+            self.active_since = None
+            self.inactive_started_mono = None
+            self._overtime_started_mono = None
+            self.last_activity = getattr(_time, "monotonic", lambda: 0)()
+            self.inactive_sent = False
+            self.next_screenshot_after_ms = None
+            self.screenshots_taken_today = 0
+        except Exception:
+            pass
+
+        # 4) Close any popups if you track them
+        try:
+            if hasattr(self, "_hide_pre_shift_popup"):
+                self._hide_pre_shift_popup()
+        except Exception:
+            pass
+
+        # 5) Reset the tracker UI if it exists
+        try:
+            tf = getattr(self, "frames", {}).get("TrackerFrame")
+            if tf and hasattr(tf, "set_status"):
+                tf.set_status("Off")
+            if tf and hasattr(tf, "set_counters"):
+                tf.set_counters(0, 0, 0, 0)
+        except Exception:
+            pass
+
+        # 6) Clear login fields (if you have an AuthFrame)
+        try:
+            af = getattr(self, "frames", {}).get("AuthFrame")
+            if af and hasattr(af, "login_id"):
+                af.login_id.set("")
+            if af and hasattr(af, "login_pwd"):
+                af.login_pwd.set("")
+        except Exception:
+            pass
+
+        # 7) Navigate to login/auth screen if your app uses frames
+        try:
+            if hasattr(self, "show_frame"):
+                self.show_frame("AuthFrame")
+        except Exception:
+            pass
+
+        return True
+
+        # ---- logout gating ----]
     def try_logout(self):
         """Block logout during shift window; allow after shift end (or if no user)."""
         if not self.current_user:
